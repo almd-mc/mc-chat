@@ -1,213 +1,130 @@
-import json
+import bytes
 
-// Minecraft Chat (JSON Text Component) parser.
+// Minecraft chat message handling for 1.21.1.
 //
 // Usage:
-//   import chat
-//   let msg = chat.from_json(json_value)
-//   let text = chat.to_plain(msg)
-//   let motd = chat.to_motd(msg)
+//   import mc_chat
+//   let msg = mc_chat.parse_system(packet_data)
 
-// ── Types ───────────────────────────────────────────
+// Play state packet IDs (1.21.1)
+let CB_SYSTEM_CHAT = 0x6C
+let CB_PLAYER_CHAT = 0x39
+let CB_DISGUISED_CHAT = 0x1E
+let SB_CHAT_COMMAND = 0x04
+let SB_CHAT_MESSAGE = 0x06
+
+// --- Chat message types ---
 
 type ChatMessage = {
   text: String,
-  translate: String,
-  with: List[ChatMessage],
-  extra: List[ChatMessage],
-  color: String,
-  bold: Bool,
-  italic: Bool,
-  underlined: Bool,
-  strikethrough: Bool,
-  obfuscated: Bool,
+  sender: String,
+  is_system: Bool,
 }
 
-fn empty() -> ChatMessage = {
-  text: "", translate: "", with: [], extra: [],
-  color: "", bold: false, italic: false, underlined: false,
-  strikethrough: false, obfuscated: false,
+// --- Parse ---
+
+fn parse_system(data: Bytes) -> ChatMessage = {
+  let text = extract_text(data)
+  { text: text, sender: "", is_system: true }
 }
 
-// ── Parse ───────────────────────────────────────────
-
-fn from_json(v: Value) -> ChatMessage =
-  match value.as_string(v) {
-    ok(s) => { ...empty(), text: s },
-    err(_) => from_object(v),
-  }
-
-fn from_object(v: Value) -> ChatMessage = {
-  let text = value.as_string(value.get(v, "text") ?? value.null()) ?? ""
-  let translate = value.as_string(value.get(v, "translate") ?? value.null()) ?? ""
-  let with_arr = value.as_array(value.get(v, "with") ?? value.null()) ?? []
-  let extra_arr = value.as_array(value.get(v, "extra") ?? value.null()) ?? []
-  let color = value.as_string(value.get(v, "color") ?? value.null()) ?? ""
-  {
-    text: text,
-    translate: translate,
-    with: with_arr |> list.map((e) => from_json(e)),
-    extra: extra_arr |> list.map((e) => from_json(e)),
-    color: color,
-    bold: value.as_bool(value.get(v, "bold") ?? value.null()) ?? false,
-    italic: value.as_bool(value.get(v, "italic") ?? value.null()) ?? false,
-    underlined: value.as_bool(value.get(v, "underlined") ?? value.null()) ?? false,
-    strikethrough: value.as_bool(value.get(v, "strikethrough") ?? value.null()) ?? false,
-    obfuscated: value.as_bool(value.get(v, "obfuscated") ?? value.null()) ?? false,
-  }
+fn parse_disguised(data: Bytes) -> ChatMessage = {
+  let text = extract_text(data)
+  { text: text, sender: "", is_system: false }
 }
 
-fn from_string(s: String) -> ChatMessage =
-  match json.parse(s) { ok(v) => from_json(v), err(_) => { ...empty(), text: s } }
-
-// ── Plain text ──────────────────────────────────────
-
-fn to_plain(msg: ChatMessage) -> String = {
-  let base = if string.len(msg.translate) > 0 then resolve_translate(msg)
-    else msg.text
-  let extra_text = msg.extra |> list.map((e) => to_plain(e)) |> list.join("")
-  base + extra_text
-}
-
-fn resolve_translate(msg: ChatMessage) -> String = {
-  let args = msg.with |> list.map((w) => to_plain(w))
-  format_translate(msg.translate, args)
-}
-
-fn format_translate(key: String, args: List[String]) -> String =
-  format_rec(key, args, 0, "")
-
-fn format_rec(fmt: String, args: List[String], pos: Int, acc: String) -> String =
-  if pos >= string.len(fmt) then acc
+// Extract readable text from NBT chat component
+fn extract_text(data: Bytes) -> String = {
+  let len = bytes.len(data)
+  if len == 0 then ""
   else {
-    let c = string.get(fmt, pos) ?? ""
-    if c == "%" and (string.get(fmt, pos + 1) ?? "") == "s" then
-      format_rec(fmt, list.drop(args, 1), pos + 2, acc + (list.first(args) ?? ""))
-    else if c == "%" and is_digit(string.get(fmt, pos + 1) ?? "") and (string.get(fmt, pos + 3) ?? "") == "s" then {
-      let idx = (int.parse(string.get(fmt, pos + 1) ?? "0") ?? 1) - 1
-      format_rec(fmt, args, pos + 4, acc + (list.get(args, idx) ?? ""))
-    } else format_rec(fmt, args, pos + 1, acc + c)
+    let first = bytes.read_u8(data, 0)
+    if first == 0x08 then {
+      // TAG_String: u16 length + UTF-8
+      if len >= 3 then {
+        let str_len = int.bor(int.bshl(bytes.read_u8(data, 1), 8), bytes.read_u8(data, 2))
+        if len >= 3 + str_len then bytes.to_string(bytes.slice(data, 3, 3 + str_len)) ?? ""
+        else ""
+      } else ""
+    } else if first == 0x0A then {
+      // TAG_Compound: search for "text" field
+      find_text_field(data, 1)
+    } else {
+      bytes.to_string(data) ?? ""
+    }
   }
-
-local fn is_digit(c: String) -> Bool =
-  c == "0" or c == "1" or c == "2" or c == "3" or c == "4"
-  or c == "5" or c == "6" or c == "7" or c == "8" or c == "9"
-
-// ── MOTD (§ color codes) ────────────────────────────
-
-fn to_motd(msg: ChatMessage) -> String = {
-  let prefix = motd_prefix(msg)
-  let base = if string.len(msg.translate) > 0 then resolve_translate(msg) else msg.text
-  let extra_text = msg.extra |> list.map((e) => to_motd(e)) |> list.join("")
-  let reset = if string.len(prefix) > 0 and string.len(extra_text) > 0 then "§r" else ""
-  prefix + base + reset + extra_text
 }
 
-fn motd_prefix(msg: ChatMessage) -> String = {
-  let color_code = color_to_motd(msg.color)
-  let bold_code = if msg.bold then "§l" else ""
-  let italic_code = if msg.italic then "§o" else ""
-  let underline_code = if msg.underlined then "§n" else ""
-  let strike_code = if msg.strikethrough then "§m" else ""
-  let obf_code = if msg.obfuscated then "§k" else ""
-  color_code + bold_code + italic_code + underline_code + strike_code + obf_code
-}
-
-fn color_to_motd(color: String) -> String =
-  match color {
-    "black" => "§0", "dark_blue" => "§1", "dark_green" => "§2", "dark_aqua" => "§3",
-    "dark_red" => "§4", "dark_purple" => "§5", "gold" => "§6", "gray" => "§7",
-    "dark_gray" => "§8", "blue" => "§9", "green" => "§a", "aqua" => "§b",
-    "red" => "§c", "light_purple" => "§d", "yellow" => "§e", "white" => "§f",
-    _ => "",
+local fn find_text_field(data: Bytes, off: Int) -> String = {
+  let len = bytes.len(data)
+  var pos = off
+  var result = ""
+  var done = false
+  while pos < len - 3 and not done {
+    let tag_type = bytes.read_u8(data, pos)
+    if tag_type == 0 then { done = true }
+    else if tag_type == 8 then {
+      let name_len = int.bor(int.bshl(bytes.read_u8(data, pos + 1), 8), bytes.read_u8(data, pos + 2))
+      let name = bytes.to_string(bytes.slice(data, pos + 3, pos + 3 + name_len)) ?? ""
+      pos = pos + 3 + name_len
+      if pos + 2 <= len then {
+        let val_len = int.bor(int.bshl(bytes.read_u8(data, pos), 8), bytes.read_u8(data, pos + 1))
+        let val = bytes.to_string(bytes.slice(data, pos + 2, pos + 2 + val_len)) ?? ""
+        pos = pos + 2 + val_len
+        if name == "text" and string.len(val) > 0 then { result = val; done = true } else { () }
+      } else { done = true }
+    } else { done = true }
   }
-
-// ── Build ───────────────────────────────────────────
-
-fn text(s: String) -> ChatMessage = { ...empty(), text: s }
-
-fn colored(s: String, color: String) -> ChatMessage = { ...empty(), text: s, color: color }
-
-fn append(msg: ChatMessage, extra: ChatMessage) -> ChatMessage =
-  { ...msg, extra: msg.extra + [extra] }
-
-fn to_json(msg: ChatMessage) -> Value = {
-  var obj: List[(String, Value)] = []
-  if string.len(msg.text) > 0 then obj = obj + [("text", value.str(msg.text))]
-  if string.len(msg.translate) > 0 then {
-    obj = obj + [("translate", value.str(msg.translate))]
-    if not list.is_empty(msg.with) then
-      obj = obj + [("with", value.array(msg.with |> list.map((w) => to_json(w))))]
-  }
-  if string.len(msg.color) > 0 then obj = obj + [("color", value.str(msg.color))]
-  if msg.bold then obj = obj + [("bold", value.bool(true))]
-  if msg.italic then obj = obj + [("italic", value.bool(true))]
-  if msg.underlined then obj = obj + [("underlined", value.bool(true))]
-  if msg.strikethrough then obj = obj + [("strikethrough", value.bool(true))]
-  if msg.obfuscated then obj = obj + [("obfuscated", value.bool(true))]
-  if not list.is_empty(msg.extra) then
-    obj = obj + [("extra", value.array(msg.extra |> list.map((e) => to_json(e))))]
-  value.object(obj)
+  result
 }
 
-fn to_string(msg: ChatMessage) -> String = value.stringify(to_json(msg))
+fn is_chat_packet(packet_id: Int) -> Bool =
+  packet_id == CB_SYSTEM_CHAT or packet_id == CB_PLAYER_CHAT or packet_id == CB_DISGUISED_CHAT
 
-// ── Tests ───────────────────────────────────────────
+// --- Tests ---
 
-test "plain text string" {
-  let msg = from_string("Hello World")
-  assert_eq(to_plain(msg), "Hello World")
+test "ChatMessage type" {
+  let msg: ChatMessage = { text: "hello", sender: "Steve", is_system: false }
+  assert_eq(msg.text, "hello")
+  assert_eq(msg.sender, "Steve")
 }
 
-test "json text component" {
-  let v = value.object([("text", value.str("Hello")), ("extra", value.array([value.object([("text", value.str(" World"))])]))])
-  let msg = from_json(v)
-  assert_eq(to_plain(msg), "Hello World")
+test "is_chat_packet" {
+  assert(is_chat_packet(0x6C))
+  assert(is_chat_packet(0x39))
+  assert(not is_chat_packet(0x26))
 }
 
-test "colored motd" {
-  let msg = colored("Error", "red")
-  assert_eq(to_motd(msg), "§cError")
+test "extract TAG_String" {
+  let data = bytes.from_list([0x08, 0x00, 0x05, 0x68, 0x65, 0x6C, 0x6C, 0x6F])
+  assert_eq(extract_text(data), "hello")
 }
 
-test "bold + color" {
-  let v = value.object([("text", value.str("Hi")), ("color", value.str("gold")), ("bold", value.bool(true))])
-  let msg = from_json(v)
-  assert_eq(to_motd(msg), "§6§lHi")
+test "extract empty" {
+  assert_eq(extract_text(bytes.new(0)), "")
 }
 
-test "translate with args" {
-  let v = value.object([
-    ("translate", value.str("chat.type.text")),
-    ("with", value.array([value.str("Steve"), value.str("Hello")])),
+test "parse_system" {
+  let data = bytes.from_list([0x08, 0x00, 0x03, 0x68, 0x69, 0x21])
+  let msg = parse_system(data)
+  assert_eq(msg.text, "hi!")
+  assert(msg.is_system)
+}
+
+test "extract TAG_Compound with text field" {
+  // Compound with one string field "text" = "hi"
+  let data = bytes.from_list([
+    0x0A,                         // TAG_Compound
+    0x08, 0x00, 0x04,             // TAG_String, name len=4
+    0x74, 0x65, 0x78, 0x74,       // "text"
+    0x00, 0x02, 0x68, 0x69,       // value len=2, "hi"
+    0x00,                         // TAG_End
   ])
-  let msg = from_json(v)
-  // chat.type.text = "%s: %s" in default lang, but without lang data we get the key
-  // For now, test that %s substitution works
-  let custom = { ...empty(), translate: "%s joined the game", with: [text("Alex")] }
-  assert_eq(to_plain(custom), "Alex joined the game")
+  assert_eq(extract_text(data), "hi")
 }
 
-test "nested extra" {
-  let msg = append(append(text("A"), text("B")), text("C"))
-  assert_eq(to_plain(msg), "ABC")
-}
-
-test "from_string with json" {
-  let msg = from_string("{\"text\":\"Hello\",\"color\":\"red\"}")
-  assert_eq(msg.text, "Hello")
-  assert_eq(msg.color, "red")
-}
-
-test "to_json roundtrip" {
-  let msg = { ...empty(), text: "Hi", color: "blue", bold: true }
-  let j = to_json(msg)
-  let parsed = from_json(j)
-  assert_eq(parsed.text, "Hi")
-  assert_eq(parsed.color, "blue")
-  assert_eq(parsed.bold, true)
-}
-
-test "empty string" {
-  assert_eq(to_plain(from_string("")), "")
+test "packet IDs match 1.21.1 spec" {
+  assert_eq(CB_SYSTEM_CHAT, 0x6C)
+  assert_eq(CB_PLAYER_CHAT, 0x39)
+  assert_eq(SB_CHAT_MESSAGE, 0x06)
 }
