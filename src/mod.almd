@@ -38,11 +38,11 @@ fn extract_text(data: Bytes) -> String = {
   let len = bytes.len(data)
   if len == 0 then ""
   else {
-    let first = bytes.read_u8(data, 0)
+    let first = bytes.get(data, 0) ?? 0
     if first == 0x08 then {
       // TAG_String: u16 length + UTF-8
       if len >= 3 then {
-        let str_len = int.bor(int.bshl(bytes.read_u8(data, 1), 8), bytes.read_u8(data, 2))
+        let str_len = int.bor(int.bshl(bytes.get(data, 1) ?? 0, 8), bytes.get(data, 2) ?? 0)
         if len >= 3 + str_len then bytes.to_string(bytes.slice(data, 3, 3 + str_len)) ?? ""
         else ""
       } else ""
@@ -61,14 +61,14 @@ local fn find_text_field(data: Bytes, off: Int) -> String = {
   var result = ""
   var done = false
   while pos < len - 3 and not done {
-    let tag_type = bytes.read_u8(data, pos)
+    let tag_type = bytes.get(data, pos) ?? 0
     if tag_type == 0 then { done = true }
     else if tag_type == 8 then {
-      let name_len = int.bor(int.bshl(bytes.read_u8(data, pos + 1), 8), bytes.read_u8(data, pos + 2))
+      let name_len = int.bor(int.bshl(bytes.get(data, pos + 1) ?? 0, 8), bytes.get(data, pos + 2) ?? 0)
       let name = bytes.to_string(bytes.slice(data, pos + 3, pos + 3 + name_len)) ?? ""
       pos = pos + 3 + name_len
       if pos + 2 <= len then {
-        let val_len = int.bor(int.bshl(bytes.read_u8(data, pos), 8), bytes.read_u8(data, pos + 1))
+        let val_len = int.bor(int.bshl(bytes.get(data, pos) ?? 0, 8), bytes.get(data, pos + 1) ?? 0)
         let val = bytes.to_string(bytes.slice(data, pos + 2, pos + 2 + val_len)) ?? ""
         pos = pos + 2 + val_len
         if name == "text" and string.len(val) > 0 then { result = val; done = true } else { () }
@@ -101,7 +101,7 @@ test "extract TAG_String" {
 }
 
 test "extract empty" {
-  assert_eq(extract_text(bytes.new(0)), "")
+  assert_eq(extract_text(bytes.zeros(0)), "")
 }
 
 test "parse_system" {
